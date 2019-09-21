@@ -3,7 +3,7 @@ package jwtutil
 import (
 	"time"
 
-	"github.com/kekru/forward-proxy-auth/model"
+	"../model"
 
 	"github.com/dgrijalva/jwt-go"
 	log "github.com/sirupsen/logrus"

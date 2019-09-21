@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kekru/forward-proxy-auth/model"
+	"../model"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/ldap.v2"
 )
@@ -109,7 +109,7 @@ func (ldapAuth *LdapAuth) Authenticate(username string, password string) (user *
 	)
 	searchResult, err = ldapAuth.connection.Search(searchRequest)
 	if err != nil {
-		log.Debugf("Error getting groups for user %s identified in goups by %s, %s", username, groupFilter, err)
+		log.Debugf("Error getting groups for user %s identified in groups by %s, %s", username, groupFilter, err)
 		return nil, err
 	}
 

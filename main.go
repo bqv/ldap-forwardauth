@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kekru/forward-proxy-auth/authenticator"
-	"github.com/kekru/forward-proxy-auth/jwtutil"
-	"github.com/kekru/forward-proxy-auth/model"
+	"./authenticator"
+	"./jwtutil"
+	"./model"
 
 	"github.com/go-yaml/yaml"
 	log "github.com/sirupsen/logrus"
@@ -29,6 +29,7 @@ type Authenticator interface {
 
 type LoginFormData struct {
 	LoginUri string
+	ErrorText string
 }
 
 type ForwardAuthConfig struct {
@@ -76,11 +77,17 @@ var jwtUtil *jwtutil.JwtUtil
 var authenticators []Authenticator
 var config *ForwardAuthConfig
 
+var NoFormCredentialsError = errors.New("Username or Password was empty")
+var NoBasicAuthError = errors.New("no basic auth credentials")
+
 func main() {
 	log.SetLevel(log.DebugLevel)
 
 	config = &ForwardAuthConfig{}
-	bytes, err := ioutil.ReadFile("config.yml")
+	bytes, err := ioutil.ReadFile("/etc/forward-proxy-auth/config.yml")
+	if err != nil {
+                bytes, err = ioutil.ReadFile("config.yml")
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -227,6 +234,11 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 
 	// try to extraxct user from token
 	user, expiryTime, err := extractUserFromToken(r)
+
+	if err == nil {
+                err = userHasGroup(user, r.Header.Get("X-Ldap-Group"))
+	}
+
 	if err == nil {
 		writeAuthenticationResponseHeaders(w, user)
 		writeUserResponse(w, user, expiryTime)
@@ -249,6 +261,10 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		forwardedUri = getForwardedUri(r)
 	}
 
+	if err == nil {
+                err = userHasGroup(user, r.Header.Get("X-Ldap-Group"))
+	}
+
 	if err != nil {
 		// no valid credentials, show new basic auth dialog
 		log.Debugf("Could not login. %s", err)
@@ -258,7 +274,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted Area"`)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		} else if method == "htmlform" {
-			writeLoginpage(w, forwardedUri)
+			writeLoginpage(w, forwardedUri, err)
 		} else {
 			log.Errorf("Unknown authentication method: %s", method)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -297,7 +313,7 @@ func login(r *http.Request) (user *model.User, err error) {
 		username, password, authOK = r.BasicAuth()
 
 		if !authOK {
-			err = errors.New("no basic auth credentials")
+			err = NoBasicAuthError
 			return
 		}
 	} else if method == "htmlform" {
@@ -308,7 +324,7 @@ func login(r *http.Request) (user *model.User, err error) {
 		username = strings.TrimSpace(r.Form.Get("username"))
 		password = strings.TrimSpace(r.Form.Get("password"))
 		if len(username) == 0 && len(password) == 0 {
-			err = errors.New("username or password of html form was empty")
+			err = NoFormCredentialsError
 			return
 		}
 
@@ -330,11 +346,14 @@ func login(r *http.Request) (user *model.User, err error) {
 	return
 }
 
-func writeLoginpage(w http.ResponseWriter, forwardedUri string) {
+func writeLoginpage(w http.ResponseWriter, forwardedUri string, errorState error) {
 
-	t, err := template.ParseFiles("static/login.html")
+	t, err := template.ParseFiles("/var/lib/forward-proxy-auth/login.html")
 	if err != nil {
-		log.Errorf("could not read static/login.html, %s", err)
+                t, err = template.ParseFiles("static/login.html")
+	}
+	if err != nil {
+		log.Errorf("could not read login.html, %s", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 
@@ -342,9 +361,41 @@ func writeLoginpage(w http.ResponseWriter, forwardedUri string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusUnauthorized)
 
+        errorText := ""
+        if errorState != NoBasicAuthError && errorState != NoFormCredentialsError {
+                errorText = errorState.Error()
+        }
+
 	templateData := &LoginFormData{
 		LoginUri: config.Server.Uri + "/auth?redirect=" + forwardedUri,
+		ErrorText: errorText,
 	}
 
 	t.Execute(w, templateData)
+}
+
+func userHasGroup(u *model.User, h string) error {
+	// check user for group
+        groupCns := make(map[string]bool)
+        for _, groupCn := range strings.Split(h, ",") {
+                groupCn = strings.TrimSpace(groupCn)
+	        if len(groupCn) > 0 {
+                        groupCns[strings.ToLower(groupCn)] = true
+                }
+        }
+
+        if len(groupCns) > 0 {
+                matchingGroup := false
+                for _, userGroup := range u.Groups {
+                        if groupCns[strings.ToLower(userGroup)] {
+                                matchingGroup = true
+                        }
+                }
+                if !matchingGroup {
+                        log.Debugf("Could not authorize user %#v for query %#v", u, h)
+                        return errors.New(fmt.Sprintf("Insufficient permissions on user %s to authorize request", u.Name))
+                }
+        }
+
+        return nil
 }
